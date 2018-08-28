@@ -17,9 +17,14 @@
 """A filter that reads a xunitXML stream and outputs a subunit stream.
 """
 
+import datetime
 import sys
+import math
 
+from subunit.iso8601 import UTC
 from subunit.v2 import StreamResultToBytes
+from datetime import timedelta
+from xml.etree import ElementTree as ET
 
 STATUS_CODES = frozenset([
     'exists',
@@ -30,33 +35,25 @@ STATUS_CODES = frozenset([
     'xfail',
 ])
 
-try:
-    import xunitparser
-except ImportError:
-    sys.stderr.write("xunitparser (https://pypi.python.org/pypi/xunitparser)"
-                     "is required for this filter.")
-    raise
 
 def xunit2subunit(xunitxml_input=sys.stdin, output=sys.stdout):
     output = StreamResultToBytes(output)
-    output.startTestRun()
-    ts, tr = xunitparser.parse(xunitxml_input)
-    for tc in ts:
-        print(vars(tc))
-        test_id = tc.methodname
+    tree = ET.parse(xunitxml_input)
+    for testcase in tree.findall('.//testcase'):
+        test_id = testcase.attrib.get('name')
         test_metadata = None
         test_status = None
-        if tc.good:
-            if tc.result == "skipped":
-                test_status = "skip"
-            else:
-                test_status = "success"
-        else:
-            test_status = "fail"
-        write_test(output, test_id, test_status, test_metadata)
-    output.stopTestRun()
+        skipped = None
+        failure = None
+        test_time = to_timedelta(testcase.attrib.get('time'))
+        skipped = testcase.find('.//skipped')
+        failure = testcase.find('.//failure')
+        if skipped is not None : test_status = "skip"
+        elif failure is not None :test_status = "fail"
+        else : test_status = "success"
+        write_test(output, test_id, test_status, test_metadata, test_time)
 
-def write_test(output, test_id, test_status, metadatas):
+def write_test(output, test_id, test_status, metadatas, test_time):
     write_status = output.status
     kwargs = {}
     if metadatas:
@@ -66,10 +63,25 @@ def write_test(output, test_id, test_status, metadatas):
         if 'attrs' in metadatas:
             test_id = test_id + '[' + metadatas['attrs'] + ']'
     kwargs['test_id'] = test_id
-    write_status(**kwargs)
     if test_status in STATUS_CODES:
         kwargs['test_status'] = test_status
+    kwargs['timestamp'] = create_timestamp()
+    kwargs['test_status'] = "inprogress"
     write_status(**kwargs)
+    kwargs['timestamp'] = create_timestamp() + test_time
+    kwargs['test_status'] = test_status
+    write_status(**kwargs)
+
+def to_timedelta(value):
+    if value is None:
+        return None
+    sec = float(value)
+    if math.isnan(sec):
+        return None
+    return timedelta(seconds=sec)
+
+def create_timestamp():
+    return datetime.datetime.now(UTC)
 
 if __name__ == '__main__':
     sys.exit(xunit2subunit(sys.stdin, sys.stdout))
